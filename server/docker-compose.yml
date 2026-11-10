@@ -1,0 +1,32 @@
+# 剪贴板助手 · 自建同步服务器
+#
+# 用法：
+#   1) 把本目录上传到服务器的 /opt/clipsync
+#   2) cd /opt/clipsync && docker compose up -d --build
+#   3) 在阿里云轻量应用服务器「防火墙」里放行 47820 端口
+#
+# 只有密文中转，没有数据库；./data 里只有客户端加密好的内容。
+
+services:
+  clipsync:
+    build: .
+    image: clipsync-server:1.0.0
+    container_name: clipsync
+    restart: unless-stopped
+    ports:
+      - "47820:47820"          # 左边是服务器端口，改了这里客户端也要改
+    environment:
+      CLIP_PORT: "47820"
+      CLIP_DATA: /data
+      CLIP_TTL_HOURS: "168"    # 中转密文最长保留 7 天，两端确认后立即删除
+      # 需要 HTTPS 时把证书挂进来并打开下面两行：
+      # CLIP_TLS_CERT: /certs/fullchain.pem
+      # CLIP_TLS_KEY: /certs/privkey.pem
+    volumes:
+      - ./data:/data
+      # - ./certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:47820/v1/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

@@ -1,0 +1,260 @@
+# 自建同步服务器 · 部署说明（照着做就行）
+
+这份说明写给**不写代码的人**。按顺序做完，两台电脑就能在不同的网络下同步剪贴板记录，
+而且**服务器看不到你的内容**。
+
+全程大约 20 分钟，中间只需要在阿里云控制台点几下、复制粘贴三条命令。
+
+---
+
+## 0. 先说清楚三件事
+
+1. **服务器只当"收发室"。** 内容在你电脑上就已经加密好了，服务器收到的是密文，它没有钥匙，
+   打不开；你的数据目录里也只有密文。日志里只有"谁在几点连过、结果是什么"，**没有任何内容**。
+2. **HTTPS 是可选的。** 因为内容本来就已经加密，TLS 只是再套一层"别人看不出你在同步什么"。
+   不配也能正常用；配了更稳一点。
+3. **默认端口 47820。** 可以在安装时改成别的，但客户端也要填一样的。
+
+你需要的材料：
+
+- 一台阿里云轻量应用服务器（Linux，x86_64，装的是 Ubuntu / Alibaba Cloud Linux / CentOS 都行）
+- 服务器程序的压缩包 `clipsync-server-linux-x64.tar.gz`
+  （里面是：程序 `clipsync-server`、一键安装脚本 `install.sh`、Docker 配置、这份说明）
+- 两台装了剪贴板助手的 Windows 电脑
+
+---
+
+## 1. 阿里云放行端口（最容易漏的一步）
+
+阿里云默认把没放行的端口全挡住，表现就是"连不上"。
+
+1. 打开阿里云控制台 → **轻量应用服务器** → 点你那一台服务器 → 左边选 **防火墙**。
+2. 点 **添加规则**：
+   - 应用类型：**自定义**
+   - 协议：**TCP**
+   - 端口范围：**47820**（如果你打算用别的端口，就填别的）
+   - 备注：剪贴板同步
+3. 保存。**不用重启服务器**，立刻生效。
+
+> 轻量应用服务器用上面这个"防火墙"就够；如果是 ECS（云服务器），对应的是「安全组」，
+> 在「安全组 → 入方向 → 添加规则」里放行 TCP 47820 即可。
+
+如果你的系统本身还开了防火墙（Ubuntu 常见），再执行一条：
+
+```bash
+sudo ufw allow 47820/tcp          # Ubuntu / Debian
+sudo firewall-cmd --add-port=47820/tcp --permanent && sudo firewall-cmd --reload   # CentOS / Alibaba Cloud Linux
+```
+
+---
+
+## 2. 上传程序
+
+**方法 A（最简单，用网页终端）**
+
+1. 控制台 → 轻量应用服务器 → 你的实例 → 右上角 **远程连接 / Workbench**，登录（root）。
+2. 在终端里执行下面这条，创建一个目录：
+
+   ```bash
+   mkdir -p /opt/clipsync && cd /opt/clipsync
+   ```
+
+3. 点 Workbench 上方工具栏的 **上传文件**，把压缩包上传到 `/root`，
+   然后回到终端解压（文件名以你手上的为准）：
+
+   ```bash
+   tar -xzf /root/clipsync-server-linux-x64.tar.gz -C /opt/clipsync
+   ls -lh /opt/clipsync
+   ```
+
+   应该能看到 `clipsync-server`、`install.sh`、`docker-compose.yml` 这些文件。
+
+**方法 B（会用 scp 的人）**
+
+```bash
+scp clipsync-server-linux-x64.tar.gz root@你的服务器IP:/root/
+```
+
+然后照上面的解压命令做。
+
+---
+
+## 3. 一键安装并启动
+
+```bash
+cd /opt/clipsync
+sudo bash install.sh
+```
+
+它会做这些事：装程序到 `/usr/local/bin/clipsync-server`、建一个专用系统账号、
+注册成开机自启的服务、数据放在 `/var/lib/clipsync`、然后立刻启动。
+
+想换端口：
+
+```bash
+sudo CLIP_PORT=50000 bash install.sh
+```
+
+看到 `[OK] 服务已启动，端口 47820` 就成了。
+
+---
+
+## 4. 验证服务真的在跑
+
+**4.1 在服务器上自检**
+
+```bash
+curl http://127.0.0.1:47820/v1/health
+```
+
+正常会返回类似：
+
+```json
+{"ok":true,"service":"clipsync-relay","version":"1.0.0","rooms":0,"time":"2026-11-10T09:00:00Z"}
+```
+
+看到 `"ok":true` 就说明服务在跑。
+
+再看服务状态：
+
+```bash
+systemctl status clipsync
+```
+
+应该是 `active (running)`。
+
+**4.2 从你自己的电脑确认端口通**
+
+在 Windows 上打开 PowerShell：
+
+```powershell
+Test-NetConnection 你的服务器公网IP -Port 47820
+```
+
+最后一行 `TcpTestSucceeded : True` 就说明端口通了。
+如果是 `False`，回到第 1 步检查防火墙/安全组。
+
+---
+
+## 5. 两台电脑配对
+
+在**第一台**电脑上：
+
+1. 打开剪贴板助手 → 设置 → **同步** → 方式选 **自建服务器**。
+2. 服务器地址填**公网 IP**（例如 `47.100.12.34`），端口填 `47820`（和你装的一致）。
+3. 点 **保存并生效**，再点 **测试连通**。
+   - 成功会显示：`连接成功 · 服务器 版本 1.0.0 · 延迟 xx 毫秒`
+   - 失败会直接告诉你卡在哪：域名解析、端口不通、配对码不对、证书不受信。
+4. 点 **生成配对码**，屏幕上会出现 6 位数字（5 分钟内有效）。
+
+在**第二台**电脑上：
+
+1. 同样填**同一个地址和端口**，保存并测试连通。
+2. 点 **输入配对码并加入**，把第一台显示的 6 位数字填进去。
+3. 回到**第一台**电脑，在「待确认」里点 **允许加入**。
+
+第二台电脑上会提示「配对成功」。之后：
+- 文字记录自动同步（几十秒内，取决于网络）；
+- 置顶、收藏、复制次数、删除动作都会跟着同步；
+- 图片只同步"有这么一张图"，点开时才去另一台取原图。
+
+---
+
+## 6. 想用 HTTPS（可选）
+
+前提：你有一个域名，并且已经解析到这台服务器。最省事的做法是用 `certbot` 申请免费证书：
+
+```bash
+sudo apt install certbot          # Ubuntu
+sudo certbot certonly --standalone -d sync.example.com
+```
+
+证书在 `/etc/letsencrypt/live/sync.example.com/` 下。然后编译时/安装时指定：
+
+1. 修改 `/etc/systemd/system/clipsync.service`，在 `[Service]` 里加两行：
+
+   ```
+   Environment=CLIP_TLS_CERT=/etc/letsencrypt/live/sync.example.com/fullchain.pem
+   Environment=CLIP_TLS_KEY=/etc/letsencrypt/live/sync.example.com/privkey.pem
+   ```
+
+2. 让专用账号能读证书（Let's Encrypt 目录默认只有 root 能读）：
+
+   ```bash
+   sudo chmod -R 755 /etc/letsencrypt/live /etc/letsencrypt/archive
+   ```
+
+3. 重启：
+
+   ```bash
+   sudo systemctl daemon-reload && sudo systemctl restart clipsync
+   ```
+
+4. 客户端里勾上 **使用 HTTPS**，地址仍填域名，端口填 443 或你映射的端口，再点测试连通。
+
+> 用**自己签的证书**也可以，但客户端要勾 **信任自签名证书**，否则会提示"证书不受信"。
+
+---
+
+## 7. 日常维护
+
+| 想做的事 | 命令 |
+| --- | --- |
+| 看服务是否在跑 | `systemctl status clipsync` |
+| 看实时日志（只有连接与错误码） | `journalctl -u clipsync -f` |
+| 重启 | `sudo systemctl restart clipsync` |
+| 停止 | `sudo systemctl stop clipsync` |
+| 升级程序 | 上传新的 `clipsync-server` 后 `sudo bash install.sh` |
+| 卸载（保留数据） | `sudo bash install.sh --uninstall` |
+| 彻底清空中转数据 | `sudo rm -rf /var/lib/clipsync/*` |
+
+数据目录 `/var/lib/clipsync` 里只有三类东西：配对房间信息（谁跟谁配对、在线状态）、
+每个设备的收件箱（**密文**）、服务器自己的日志。**没有明文，也没有密钥。**
+
+中转密文默认保留 7 天（可用 `CLIP_TTL_HOURS` 改），对方确认收到后会立刻删除。
+
+---
+
+## 8. 常见故障对照表
+
+| 现象 | 多半是这个原因 | 怎么办 |
+| --- | --- | --- |
+| 测试连通提示 **"连不上服务器（端口 47820 不通）"** | 安全组/防火墙没放行，或服务没启动 | 第 1 步放行端口；服务器上 `systemctl status clipsync` 看是否 running |
+| 测试连通提示 **"连接超时"** | 端口被挡（安全组或系统防火墙），或 IP 填错 | 用 `Test-NetConnection IP -Port 47820` 在电脑上验证；检查是否用了内网 IP |
+| 测试连通提示 **"域名解析失败"** | 域名没解析，或拼错了 | `ping 你的域名` 看是否解析到服务器公网 IP |
+| 测试连通提示 **"这个端口上不是剪贴板助手的同步服务"** | 端口填错，或那上面跑着别的服务 | 核对端口；`curl http://IP:端口/v1/health` 看返回 |
+| 测试连通提示 **"配对码不正确或已过期"** | 配对码超过 5 分钟，或两台填的不是同一个服务器 | 在第一台点「换一个」重新生成，再在第二台输入 |
+| 启动失败，日志写 **"listen tcp :47820: bind: address already in use"** | 端口被别的程序占用 | `sudo ss -ltnp \| grep 47820` 查占用者；或换端口重装（`CLIP_PORT=50000`），客户端同步改端口 |
+| 浏览器/客户端提示 **"证书不受信"** | 用了自签名证书，或证书域名和填的地址不一致 | 勾上「信任自签名证书」；或改用正式证书、地址用域名 |
+| 提示 **"尝试次数过多，服务器暂时限制"** | 配对码输错 6 次，本机 IP 被临时封 10 分钟 | 等 10 分钟，或换一台设备/网络重试；确认配对码是新的 |
+| 已配对但显示 **"对方离线"** | 另一台电脑关机了，或它那边断网 | 打开另一台电脑、恢复网络，几十秒内自动补传 |
+| 换了网络后不同步 | 客户端在切网时会自动重连，最多等 30 秒 | 超过 1 分钟还不行，在客户端点一次「测试连通」确认服务器可达 |
+| 显示 **"你已被移出同步"** | 另一台电脑上把本机吊销了 | 重新配对一次；两台的历史记录都还在，不会丢 |
+
+---
+
+## 9. 用 Docker 部署（可选）
+
+服务器上装了 Docker 的话：
+
+```bash
+cd /opt/clipsync
+sudo docker compose up -d --build
+sudo docker compose logs -f         # 看日志
+```
+
+端口、数据目录在 `docker-compose.yml` 里改。健康检查已经配好，
+`docker compose ps` 显示 `healthy` 就说明正常。
+
+---
+
+## 10. 安全边界（一次说清楚）
+
+- **服务端看不到内容**：客户端上传前就用两台电脑共享的密钥做了 AES-256-CBC + HMAC-SHA256 加密，
+  服务器只做存储与转发，没有解密密钥。
+- **配对需要你本人点一下**：第二台申请加入后，必须由第一台点「允许加入」；
+  配对码 5 分钟过期、用过即废。
+- **白名单**：只有配对成功的两台设备的令牌能读写房间；被吊销的设备立刻 403。
+- **试错保护**：同一 IP 10 分钟内配对失败 6 次，封 10 分钟。
+- **不留内容**：日志只有 IP、方法、路径、状态码；内容不写日志。
+- **会自动清空**：对方确认收到即删除；没确认的按保留期（默认 7 天）清理；空房间整体回收。

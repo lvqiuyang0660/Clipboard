@@ -1,0 +1,30 @@
+# ---- 构建产物 ----
+bin/
+obj/
+dist/
+*.exe
+*.dll
+*.pdb
+*.tar.gz
+*.zip
+*.user
+.vs/
+
+# ---- 本地运行数据（只属于本机，绝不入库） ----
+data/
+history.dat
+images/
+thumbs/
+settings.xml
+*.log
+clipboard-formats.log
+error.log
+debug.log
+
+# ---- 联调探针与临时截图 ----
+_probe/
+.screenshots/
+
+# ---- 系统杂项 ----
+.DS_Store
+Thumbs.db
