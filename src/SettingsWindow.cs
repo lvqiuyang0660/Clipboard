@@ -83,7 +83,7 @@ namespace ClipHelper
             TextBlock brandName = Ui.Text("剪贴板助手", 13, Theme.Txt);
             brandName.FontWeight = FontWeights.SemiBold;
             brandText.Children.Add(brandName);
-            TextBlock brandSub = Ui.Text("v1.0.0 · 仅本机存储", 10.5, Theme.Txt3);
+            TextBlock brandSub = Ui.Text("v" + BuildInfo.AppVersion, 10.5, Theme.Txt3);
             brandSub.Margin = new Thickness(0, 2, 0, 0);
             brandText.Children.Add(brandSub);
             Grid.SetColumn(brandText, 1);
@@ -162,6 +162,7 @@ namespace ClipHelper
 
             card.Child = root;
             Content = card;
+            Ui.EnableDrag(this, card, 56);
 
             BuildNav();
             BuildContent();
@@ -651,7 +652,9 @@ namespace ClipHelper
         void BuildAbout()
         {
             StackPanel rows = new StackPanel();
-            rows.Children.Add(ItemRow("版本", "第一版（MVP）", Ui.Text("v1.0.0", 11.5, Theme.Txt2)));
+            rows.Children.Add(ItemRow("版本", "当前安装版本", Ui.Text("v" + BuildInfo.AppVersion, 11.5, Theme.Txt2)));
+            ClickBox checkUpdate = Ui.Btn("检查更新", false, delegate { UpdateService.CheckNow(_cfg, this); });
+            rows.Children.Add(ItemRow("更新", "查看新版本与更新内容，确认后再下载", checkUpdate));
             rows.Children.Add(ItemRow("呼出快捷键", "全局生效", KeyCaps(new string[] { "Alt", "V" })));
             rows.Children.Add(ItemRow("数据目录", _store.Dir, new TextBlock()));
             rows.Children.Add(ItemRow("记录上限", "可随时在「存储与清理」里调整", Ui.Text(_cfg.MaxItems > 0 ? _cfg.MaxItems + " 条 / " + (_cfg.MaxDays > 0 ? _cfg.MaxDays + " 天" : "不限") : "不限", 11.5, Theme.Txt2)));
@@ -828,7 +831,7 @@ namespace ClipHelper
             sb.Append('|').Append(s.FolderPairPending ? "1" : "0").Append('|').Append(s.FolderPairCode);
             sb.Append('|').Append(s.JoinWaiting ? "1" : "0");
             sb.Append('|').Append(s.RelayDir);
-            sb.Append('|').Append(s.ServerAddressText).Append(s.ServerCode).Append(s.ServerReachable ? "1" : "0").Append(s.ServerLatencyText);
+            sb.Append('|').Append(s.ServerAddressText).Append(s.ServerCode).Append(s.InviteCode).Append(s.ServerReachable ? "1" : "0").Append(s.ServerLatencyText);
             foreach (ServerDeviceInfo sd in s.SnapshotServerDevices()) sb.Append('|').Append("D").Append(sd.Id).Append(sd.Online ? "1" : "0");
             foreach (Discovered d in s.SnapshotDiscovered()) sb.Append('|').Append(d.Id).Append(':').Append(d.Address);
             foreach (PendingPair p in s.SnapshotPending()) sb.Append('|').Append("P").Append(p.Id);
@@ -1012,8 +1015,8 @@ namespace ClipHelper
 
         void BuildSyncPairing(SyncService sync)
         {
-            // ---- 6 位配对码
-            StackPanel codeRows = new StackPanel();
+            // ---- 把配对码给对方
+            StackPanel give = new StackPanel();
             StackPanel codeRight = new StackPanel();
             codeRight.Orientation = Orientation.Horizontal;
             codeRight.VerticalAlignment = VerticalAlignment.Center;
@@ -1036,19 +1039,47 @@ namespace ClipHelper
 
             int left = sync.CodeSecondsLeft;
             string expire = left > 0 ? ("剩余 " + (left / 60) + " 分 " + (left % 60) + " 秒有效") : "已过期，点「换一个」重新生成";
-            codeRows.Children.Add(BlockRow("配对码", expire, codeRight));
-            _content.Children.Add(Section("第一步：在一台上生成配对码", "把它读给另一台电脑（或用共享文件夹传过去），配对成功后立即作废", codeRows));
+            give.Children.Add(BlockRow("配对码", expire, codeRight));
 
-            // ---- 附近发现的电脑
-            StackPanel near = new StackPanel();
+            List<PendingPair> pending = sync.SnapshotPending();
+            foreach (PendingPair p in pending)
+            {
+                PendingPair req = p;
+                StackPanel btns = new StackPanel();
+                btns.Orientation = Orientation.Horizontal;
+                ClickBox deny = Ui.Btn("拒绝", false, delegate { sync.DenyPending(req.Id); BuildContent(); });
+                btns.Children.Add(deny);
+                ClickBox allow = Ui.Btn("允许加入", true, delegate
+                {
+                    sync.AllowPending(req.Id);
+                    BuildContent();
+                    Ui.Info(this, "已允许加入", req.Name + " 现在和这台电脑建立了加密连接。文字记录会自动同步；图片要点开时才获取。");
+                });
+                allow.Margin = new Thickness(8, 0, 0, 0);
+                btns.Children.Add(allow);
+                give.Children.Add(ItemRow("请求加入：" + req.Name,
+                    req.Os + " · " + SyncService.MaskAddress(req.Address) + " · 配对码 " + req.Code, btns));
+            }
+            if (pending.Count > 0)
+            {
+                TextBlock warn = Ui.Wrap("如果不是你本人操作，请点「拒绝」，并重新生成配对码。", 10.5,
+                    Theme.Hex(Theme.IsLight ? "#B46000" : "#E2AB34"));
+                warn.Margin = new Thickness(0, 8, 0, 10);
+                warn.LineHeight = 17;
+                give.Children.Add(warn);
+            }
+            _content.Children.Add(Section("把配对码给对方", "", give));
+
+            // ---- 加入另一台电脑
+            StackPanel join = new StackPanel();
             List<Discovered> found = sync.SnapshotDiscovered();
             if (found.Count == 0)
             {
-                TextBlock none = Ui.Wrap("附近还没有发现其他电脑。请确认两台在同一个 Wi-Fi / 同一网段；如果平常不在同一个网络，直接用下面的「共享文件夹配对」。",
-                    11, Theme.Txt3);
-                none.LineHeight = 18;
-                none.Margin = new Thickness(0, 8, 0, 10);
-                near.Children.Add(none);
+                StackPanel joinBtns = new StackPanel();
+                joinBtns.Orientation = Orientation.Horizontal;
+                ClickBox enter = Ui.Btn("输入配对码", true, delegate { PromptPairCodeAny(sync); });
+                joinBtns.Children.Add(enter);
+                join.Children.Add(ItemRow("输入配对码", "另一台也要切到「局域网配对」", joinBtns));
             }
             else
             {
@@ -1059,44 +1090,13 @@ namespace ClipHelper
                     btns.Orientation = Orientation.Horizontal;
                     ClickBox byCode = Ui.Btn("输入配对码", false, delegate { PromptPairCode(dev); });
                     btns.Children.Add(byCode);
-                    ClickBox join = Ui.Btn("请求加入", false, delegate { PromptJoin(dev); });
-                    join.Margin = new Thickness(8, 0, 0, 0);
-                    btns.Children.Add(join);
-                    near.Children.Add(ItemRow(dev.Name, dev.Os + " · " + SyncService.MaskAddress(dev.Address), btns));
+                    ClickBox req = Ui.Btn("请求加入", false, delegate { PromptJoin(dev); });
+                    req.Margin = new Thickness(8, 0, 0, 0);
+                    btns.Children.Add(req);
+                    join.Children.Add(ItemRow(dev.Name, dev.Os + " · " + SyncService.MaskAddress(dev.Address), btns));
                 }
             }
-            _content.Children.Add(Section("第二步：在另一台上确认", "输入配对码即完成绑定；也可以点「请求加入」，由这台电脑点允许加入", near));
-
-            // ---- 待确认请求
-            List<PendingPair> pending = sync.SnapshotPending();
-            if (pending.Count > 0)
-            {
-                StackPanel wait = new StackPanel();
-                foreach (PendingPair p in pending)
-                {
-                    PendingPair req = p;
-                    StackPanel btns = new StackPanel();
-                    btns.Orientation = Orientation.Horizontal;
-                    ClickBox deny = Ui.Btn("拒绝", false, delegate { sync.DenyPending(req.Id); BuildContent(); });
-                    btns.Children.Add(deny);
-                    ClickBox allow = Ui.Btn("允许加入", true, delegate
-                    {
-                        sync.AllowPending(req.Id);
-                        BuildContent();
-                        Ui.Info(this, "已允许加入", req.Name + " 现在和这台电脑建立了加密连接。文字记录会自动同步；图片要点开时才获取。");
-                    });
-                    allow.Margin = new Thickness(8, 0, 0, 0);
-                    btns.Children.Add(allow);
-                    wait.Children.Add(ItemRow("有 1 台新设备请求加入：" + req.Name,
-                        req.Os + " · " + SyncService.MaskAddress(req.Address) + " · 配对码 " + req.Code, btns));
-                }
-                TextBlock warn = Ui.Wrap("如果不是你本人操作，请点「拒绝」，并在下面点「断开全部设备」后重新生成配对码。", 10.5,
-                    Theme.Hex(Theme.IsLight ? "#B46000" : "#E2AB34"));
-                warn.Margin = new Thickness(0, 8, 0, 10);
-                warn.LineHeight = 17;
-                wait.Children.Add(warn);
-                _content.Children.Add(Section("待确认", "安全关键路径：这里不允许静音，每次新设备加入都必须由你点一次", wait));
-            }
+            _content.Children.Add(Section("加入另一台电脑", "", join));
 
             BuildSyncFolderPairing(sync);
         }
@@ -1249,7 +1249,7 @@ namespace ClipHelper
                 pair.Children.Add(BlockRow("待确认", "安全关键路径：不允许静音，每次新设备加入都要你点一次", wait));
             }
 
-            _content.Children.Add(Section("配对（经服务器中转）", "配对只做一次；之后两台各自和服务器保持一条长连接", pair));
+            _content.Children.Add(Section("配对（经服务器中转）", "首次配对只做一次；之后每台设备各自和服务器保持一条长连接，房间最多 4 台", pair));
         }
 
         void BuildSyncServerDevices(SyncService sync)
@@ -1297,7 +1297,59 @@ namespace ClipHelper
                 }
                 rows.Children.Add(ItemRow(dev.Self ? sync.DeviceName : dev.Name, desc, right));
             }
-            _content.Children.Add(Section("服务器上的已配对设备", "服务器只知道「谁跟谁配对、谁在线」，不知道同步了什么", rows));
+            _content.Children.Add(Section("服务器上的已配对设备", "最多 4 台；服务器只知道「谁跟谁配对、谁在线」，不知道同步了什么", rows));
+
+            // ---- 邀请第 3 / 4 台：复用现有房间与密钥，只重新取一个 6 位码
+            StackPanel invite = new StackPanel();
+            StackPanel inviteBtns = new StackPanel();
+            inviteBtns.Orientation = Orientation.Horizontal;
+            if (sync.InviteCodeActive)
+            {
+                string ic = sync.InviteCode;
+                string shown = ic.Length == 6 ? ic.Substring(0, 3) + " " + ic.Substring(3) : ic;
+                TextBlock codeText = Ui.Text(shown, 20, Theme.Acc);
+                codeText.FontFamily = Theme.Mono;
+                codeText.FontWeight = FontWeights.SemiBold;
+                codeText.VerticalAlignment = VerticalAlignment.Center;
+                codeText.Margin = new Thickness(0, 0, 12, 0);
+                inviteBtns.Children.Add(codeText);
+            }
+            ClickBox makeInvite = Ui.Btn(sync.InviteCodeActive ? "换一个" : "邀请新设备", true, delegate
+            {
+                string err = sync.InviteServerDevice();
+                if (err != null) Ui.Info(this, "没能生成邀请码", err);
+                BuildContent();
+            });
+            inviteBtns.Children.Add(makeInvite);
+            invite.Children.Add(BlockRow(sync.InviteCodeActive ? "邀请码" : "添加设备",
+                "把 6 位数字告诉新设备；5 分钟内有效，对方被允许后立即作废。", inviteBtns));
+
+            List<PendingPair> pending = sync.SnapshotPending();
+            if (pending.Count > 0)
+            {
+                foreach (PendingPair p in pending)
+                {
+                    PendingPair req = p;
+                    StackPanel btns = new StackPanel();
+                    btns.Orientation = Orientation.Horizontal;
+                    ClickBox deny = Ui.Btn("拒绝", false, delegate { sync.DenyPending(req.Id); BuildContent(); });
+                    btns.Children.Add(deny);
+                    ClickBox allow = Ui.Btn("允许加入", true, delegate
+                    {
+                        sync.AllowPending(req.Id);
+                        BuildContent();
+                    });
+                    allow.Margin = new Thickness(8, 0, 0, 0);
+                    btns.Children.Add(allow);
+                    invite.Children.Add(ItemRow("请求加入：" + req.Name, req.Os + " · " + req.Address, btns));
+                }
+                TextBlock warn = Ui.Wrap("只允许你认识的设备加入。新设备拿到的是房间现有的密钥，加入后所有设备共用同一把。",
+                    10.5, Theme.Hex(Theme.IsLight ? "#B46000" : "#E2AB34"));
+                warn.Margin = new Thickness(0, 8, 0, 10);
+                warn.LineHeight = 17;
+                invite.Children.Add(warn);
+            }
+            _content.Children.Add(Section("邀请新设备", "房间最多 4 台；新设备从加入时刻起同步，之前的历史不会倒灌", invite));
         }
 
         TextBox MakeField(string text, string tip, double width)
@@ -1499,13 +1551,13 @@ namespace ClipHelper
             }
             rows.Children.Add(BlockRow("第二台：读取邀请", "在另一台电脑上重复同样的步骤：选择同一个文件夹 → 读取邀请 → 输入对方显示的 6 位配对码。", list));
 
-            TextBlock note = Ui.Wrap("注意：本轮先完成配对与「同一网络下的文字同步」；通过共享文件夹自动同步记录（跨网络）会在下一版提供，已配好的设备不需要重新配对。",
+            TextBlock note = Ui.Wrap("本轮先完成配对与「同一网络下的文字同步」；通过共享文件夹自动同步记录（跨网络）会在下一版提供。",
                 10.5, Theme.Txt3);
-            note.Margin = new Thickness(0, 8, 0, 10);
+            note.Margin = new Thickness(0, 0, 0, 10);
             note.LineHeight = 17;
-            rows.Children.Add(note);
+            rows.Children.Insert(0, note);
 
-            _content.Children.Add(Section("不在同一网络？用共享文件夹配对", "两台电脑各选一次文件夹、各确认一次，就算完成绑定", rows));
+            _content.Children.Add(Section("用共享文件夹完成配对", "", rows));
         }
 
         void ChooseRelayDir(SyncService sync)
@@ -1537,6 +1589,27 @@ namespace ClipHelper
             BuildNav();
             BuildContent();
             Ui.Info(this, "配对成功", "两台电脑已经建立加密连接。\n\n本轮先支持「在同一网络下」自动同步文字记录；图片只同步信息，点开时才获取。\n\n若两台不在同一网络，下一版会通过共享文件夹自动同步，不用重新配对。");
+        }
+
+        void PromptPairCodeAny(SyncService sync)
+        {
+            TextInputDialog dlg = new TextInputDialog("输入配对码",
+                "在另一台电脑上打开 设置 → 同步，把显示的 6 位配对码填在这里。", "6 位数字", 6);
+            dlg.Owner = this;
+            dlg.ShowDialog();
+            if (!dlg.OK) return;
+            string code = dlg.Value;
+
+            List<Discovered> found = sync.SnapshotDiscovered();
+            if (found.Count == 0)
+            {
+                Ui.Info(this, "还没发现对方电脑",
+                    "另一台也要打开 设置 → 同步 → 切到「局域网配对」，并连到同一个 Wi-Fi / 网段。");
+                return;
+            }
+            Discovered target = found[0];
+            RunPairAction("正在配对…", "正在和对方电脑交换密钥",
+                delegate { return _host.Sync.PairWith(target.Id, code); });
         }
 
         void PromptPairCode(Discovered d)
@@ -1656,7 +1729,7 @@ namespace ClipHelper
                 + " · 最近同步 " + Ago(sync.LastSyncLocal);
             rows.Children.Add(ItemRow(sync.PeerName, peerDesc, peerBtns));
 
-            _content.Children.Add(Section("设备", "首发最多 2 台（本机 + 1 台）。关掉某台的开关只是停止与它收发，不等于解绑",
+            _content.Children.Add(Section("设备", "局域网直连一次只连 1 台（本机 + 1 台）；要多台互同步，请切到「自建服务器」，房间最多 4 台。关掉开关只是停止收发，不等于解绑",
                 rows));
 
             StackPanel danger = new StackPanel();
@@ -1743,10 +1816,13 @@ namespace ClipHelper
             StackPanel left = new StackPanel();
             TextBlock t = Ui.Text(title, 12.5, Theme.Txt);
             left.Children.Add(t);
-            TextBlock d = Ui.Wrap(desc, 10.5, Theme.Txt3);
-            d.Margin = new Thickness(0, 3, 0, 0);
-            d.LineHeight = 16;
-            left.Children.Add(d);
+            if (!string.IsNullOrEmpty(desc))
+            {
+                TextBlock d = Ui.Wrap(desc, 10.5, Theme.Txt3);
+                d.Margin = new Thickness(0, 3, 0, 0);
+                d.LineHeight = 16;
+                left.Children.Add(d);
+            }
             Grid.SetColumn(left, 0);
             g.Children.Add(left);
 
@@ -1771,10 +1847,13 @@ namespace ClipHelper
             sp.Margin = new Thickness(0, 12, 0, 12);
             TextBlock t = Ui.Text(title, 12.5, Theme.Txt);
             sp.Children.Add(t);
-            TextBlock d = Ui.Wrap(desc, 10.5, Theme.Txt3);
-            d.Margin = new Thickness(0, 3, 0, 0);
-            d.LineHeight = 16;
-            sp.Children.Add(d);
+            if (!string.IsNullOrEmpty(desc))
+            {
+                TextBlock d = Ui.Wrap(desc, 10.5, Theme.Txt3);
+                d.Margin = new Thickness(0, 3, 0, 0);
+                d.LineHeight = 16;
+                sp.Children.Add(d);
+            }
             content.Margin = new Thickness(0, 10, 0, 0);
             sp.Children.Add(content);
             Border wrap = new Border();
@@ -1790,9 +1869,12 @@ namespace ClipHelper
             TextBlock t = Ui.Text(title, 14, Theme.Txt);
             t.FontWeight = FontWeights.SemiBold;
             sp.Children.Add(t);
-            TextBlock d = Ui.Text(desc, 11, Theme.Txt3);
-            d.Margin = new Thickness(0, 4, 0, 6);
-            sp.Children.Add(d);
+            if (!string.IsNullOrEmpty(desc))
+            {
+                TextBlock d = Ui.Text(desc, 11, Theme.Txt3);
+                d.Margin = new Thickness(0, 4, 0, 6);
+                sp.Children.Add(d);
+            }
             sp.Children.Add(rows);
 
             Border card = MakeCard();

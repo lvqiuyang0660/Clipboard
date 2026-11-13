@@ -164,6 +164,9 @@ namespace ClipHelper
             _tray.SetPaused(Cfg.Paused);
             _tray.Balloon("剪贴板助手已开始运行", "按 Alt+V 呼出历史列表；托盘图标里可以暂停记录或打开设置。");
 
+            _tray.UpdateRequested += delegate { UpdateService.CheckNow(Cfg, null); };
+            UpdateService.StartWatching(Cfg, _tray);
+
             // 跟随系统模式下，Windows 切换深/浅色时同步刷新
             Microsoft.Win32.SystemEvents.UserPreferenceChanged += delegate(object s, Microsoft.Win32.UserPreferenceChangedEventArgs e)
             {
@@ -212,6 +215,7 @@ namespace ClipHelper
             try { Native.UnregisterHotKey(_msgHwnd, _hotkeyId); } catch { }
             try { if (_msgHwnd != IntPtr.Zero) Native.RemoveClipboardFormatListener(_msgHwnd); } catch { }
             if (_tray != null) _tray.Dispose();
+            UpdateService.Stop();
             Application.Current.Shutdown();
         }
 

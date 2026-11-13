@@ -699,7 +699,7 @@ namespace ClipHelper
         public string PairWith(string deviceId, string code)
         {
             if (_cfg.SyncMode != "lan") return "当前是「仅本机」，请先切换到「局域网配对」。";
-            if (_cfg.SyncPeers.Count >= MaxPeers + 1) return "已达上限（最多 2 台），请先移除一台设备。";
+            if (_cfg.SyncPeers.Count >= MaxPeers + 1) return "局域网直连已达上限（本机 + 1 台）；要多台互同步，请切到「自建服务器」（房间最多 4 台）。";
             if (code == null) code = "";
             code = code.Trim();
             if (code.Length != 6) return "请输入对方电脑上显示的 6 位配对码。";
@@ -727,7 +727,7 @@ namespace ClipHelper
                 if (head != null && (head.Type == "pairdeny" || head.Type == "pairyerr"))
                 {
                     string reason = head.Raw("reason");
-                    if (reason == "limit") return "对方设备已达上限（最多 2 台），需要先在对方电脑上移除一台。";
+                    if (reason == "limit") return "对方的局域网直连已达上限（本机 + 1 台），需要先在对方电脑上移除一台；多台互同步请用「自建服务器」。";
                     if (reason == "local") return "对方当前是「仅本机」，还没有打开局域网配对。";
                     return "配对未被允许。";
                 }
@@ -759,7 +759,7 @@ namespace ClipHelper
         public string RequestJoin(string deviceId)
         {
             if (_cfg.SyncMode != "lan") return "当前是「仅本机」，请先切换到「局域网配对」。";
-            if (_cfg.SyncPeers.Count >= MaxPeers + 1) return "已达上限（最多 2 台），请先移除一台设备。";
+            if (_cfg.SyncPeers.Count >= MaxPeers + 1) return "局域网直连已达上限（本机 + 1 台）；要多台互同步，请切到「自建服务器」（房间最多 4 台）。";
             Discovered d = FindDiscovered(deviceId);
             if (d == null) return "这台电脑已经不在附近了，请点「刷新」后再试。";
 
@@ -790,7 +790,7 @@ namespace ClipHelper
                 if (head != null && (head.Type == "pairdeny" || head.Type == "pairyerr"))
                 {
                     string reason = head.Raw("reason");
-                    if (reason == "limit") return "对方设备已达上限（最多 2 台），需要先在对方电脑上移除一台。";
+                    if (reason == "limit") return "对方的局域网直连已达上限（本机 + 1 台），需要先在对方电脑上移除一台；多台互同步请用「自建服务器」。";
                     if (reason == "local") return "对方当前是「仅本机」，还没有打开局域网配对。";
                     return "配对未被允许。";
                 }

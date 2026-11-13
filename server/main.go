@@ -36,8 +36,8 @@ import (
 )
 
 const (
-	version        = "1.0.0"
-	maxRoomDevices = 2 // 一间房最多 2 台设备（首发口径）
+	version        = "1.0.1"
+	maxRoomDevices = 4 // 一间房最多 4 台设备；push 会给除自己外的每台各投一份密文
 	maxFrameSize   = 24 * 1024 * 1024
 	maxPushCount   = 64
 	maxPullCount   = 100
@@ -79,12 +79,13 @@ type Room struct {
 }
 
 type Config struct {
-	Port     int
-	Data     string
-	TTL      time.Duration
-	TLSCert  string
-	TLSKey   string
-	MaxFrame int64
+	Port      int
+	Data      string
+	TTL       time.Duration
+	TLSCert   string
+	TLSKey    string
+	MaxFrame  int64
+	UpdateDir string // 更新清单与新版 exe 所在目录，默认 <Data>/update
 }
 
 type Server struct {
@@ -107,6 +108,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", s.handleHealth)
 	mux.HandleFunc("/v1/room/open", s.handleRoomOpen)
+	mux.HandleFunc("/v1/room/invite", s.handleInvite) // 已配对设备：给现有房间再发一个邀请码
 	mux.HandleFunc("/v1/room/join", s.handleRoomJoin) // POST 加入 / GET 查询状态
 	mux.HandleFunc("/v1/room/pending", s.handlePending)
 	mux.HandleFunc("/v1/room/approve", s.handleApprove)
@@ -117,6 +119,8 @@ func main() {
 	mux.HandleFunc("/v1/push", s.handlePush)
 	mux.HandleFunc("/v1/pull", s.handlePull)
 	mux.HandleFunc("/v1/ack", s.handleAck)
+	mux.HandleFunc("/v1/update/latest", s.handleUpdateLatest)
+	mux.HandleFunc("/v1/update/download", s.handleUpdateDownload)
 	mux.HandleFunc("/", s.handleRoot)
 
 	handler := s.withLog(mux)
@@ -171,18 +175,24 @@ func loadConfig() Config {
 	ttl := flag.Int("ttl-hours", ttlDef, "中转数据保留小时数")
 	cert := flag.String("tls-cert", envStr("CLIP_TLS_CERT", ""), "HTTPS 证书路径（可选）")
 	key := flag.String("tls-key", envStr("CLIP_TLS_KEY", ""), "HTTPS 私钥路径（可选）")
+	updateDir := flag.String("update-dir", envStr("CLIP_UPDATE_DIR", ""), "更新清单与新版 exe 目录（默认 <data>/update）")
 	flag.Parse()
 
 	if *ttl < 1 {
 		*ttl = 1
 	}
+	ud := *updateDir
+	if ud == "" {
+		ud = filepath.Join(*data, "update")
+	}
 	return Config{
-		Port:     *port,
-		Data:     *data,
-		TTL:      time.Duration(*ttl) * time.Hour,
-		TLSCert:  *cert,
-		TLSKey:   *key,
-		MaxFrame: maxFrameSize,
+		Port:      *port,
+		Data:      *data,
+		TTL:       time.Duration(*ttl) * time.Hour,
+		TLSCert:   *cert,
+		TLSKey:    *key,
+		MaxFrame:  maxFrameSize,
+		UpdateDir: ud,
 	}
 }
 
@@ -508,6 +518,48 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	writeErr(w, http.StatusNotFound, "not_found", "这是剪贴板助手的同步服务，请用客户端连接。")
 }
 
+// ---------------------------------------------------------------- 接口：版本更新
+
+// GET /v1/update/latest —— 返回构建时生成的 update.json（只有版本、说明与校验信息，不含任何剪贴板内容）
+func (s *Server) handleUpdateLatest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method", "只支持 GET")
+		return
+	}
+	b, err := os.ReadFile(filepath.Join(s.cfg.UpdateDir, "update.json"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "no_manifest", "服务器上还没有更新清单")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
+}
+
+// GET /v1/update/download —— 返回新版 exe；客户端自行校验 PE 头 / SHA256 / 大小
+func (s *Server) handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method", "只支持 GET")
+		return
+	}
+	p := filepath.Join(s.cfg.UpdateDir, "ClipboardHelper.exe")
+	f, err := os.Open(p)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "no_package", "服务器上还没有新版程序")
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st == nil || st.IsDir() {
+		writeErr(w, http.StatusNotFound, "no_package", "服务器上还没有新版程序")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeContent(w, r, "ClipboardHelper.exe", st.ModTime(), f)
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":      true,
@@ -564,10 +616,65 @@ func (s *Server) handleRoomOpen(w http.ResponseWriter, r *http.Request) {
 	s.persist(room)
 	room.mu.Unlock()
 
-	log.Printf("新建配对房间 %s（等待另一台输入配对码）", room.ID)
+	log.Printf("新建配对房间 %s（最多 %d 台，等待其他设备输入配对码）", room.ID, maxRoomDevices)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"roomId":    room.ID,
 		"code":      room.Code,
+		"expireSec": int(codeTTL.Seconds()),
+	})
+}
+
+// POST /v1/room/invite 已配对设备：给现有房间再发一个 6 位邀请码，邀请第 3 / 4 台。
+// 配对码在 approve 后立即作废，且 /v1/room/open 只会新建房间，所以要加设备必须走这里；
+// 复用同一个 roomId 与同一个 master，新设备拿到的是房间已有的共享密钥。
+func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method", "只支持 POST")
+		return
+	}
+	var in struct {
+		RoomID   string `json:"roomId"`
+		DeviceID string `json:"deviceId"`
+		Token    string `json:"token"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_body", "请求格式不对")
+		return
+	}
+	room := s.getRoom(in.RoomID)
+	if room == nil {
+		writeErr(w, http.StatusNotFound, "no_room", "配对已失效，请重新配对")
+		return
+	}
+	// uniqueCode 只用 mapMu，先取码再锁房间，避免和 getRoom / findRoomByCode 的锁顺序打架
+	newCode := s.uniqueCode()
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	if _, code := s.authDevice(room, sanitizeID(in.DeviceID), in.Token); code != "" {
+		writeErr(w, http.StatusForbidden, code, "没有权限邀请新设备")
+		return
+	}
+	approved := 0
+	for _, d := range room.Devices {
+		if d.Approved {
+			approved++
+		}
+	}
+	if approved >= maxRoomDevices {
+		writeErr(w, http.StatusConflict, "room_full",
+			fmt.Sprintf("房间已满（最多 %d 台），请先移除一台设备", maxRoomDevices))
+		return
+	}
+	now := time.Now().UTC()
+	room.Code = newCode
+	room.CodeExpire = now.Add(codeTTL)
+	// 旧码带进来的待确认申请一并作废，避免换了码还看到上一个申请
+	room.Pendings = nil
+	room.LastActive = now
+	s.persist(room)
+	log.Printf("房间 %s 生成了新邀请码（当前 %d/%d 台）", room.ID, approved, maxRoomDevices)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"code":      newCode,
 		"expireSec": int(codeTTL.Seconds()),
 	})
 }
@@ -668,7 +775,8 @@ func (s *Server) handleRoomJoin(w http.ResponseWriter, r *http.Request) {
 	}
 	if approved >= maxRoomDevices {
 		s.limiter.fail(ip)
-		writeErr(w, http.StatusConflict, "room_full", "对方已达上限（最多 2 台），需要先在那台电脑上移除一台。")
+		writeErr(w, http.StatusConflict, "room_full",
+			fmt.Sprintf("对方已达上限（最多 %d 台），需要先移除一台设备。", maxRoomDevices))
 		return
 	}
 	// 同一设备在多个网络上同时请求：更新而不是新增
@@ -791,7 +899,8 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if approved >= maxRoomDevices {
-		writeErr(w, http.StatusConflict, "room_full", "已达上限（最多 2 台），请先移除一台")
+		writeErr(w, http.StatusConflict, "room_full",
+			fmt.Sprintf("已达上限（最多 %d 台），请先移除一台", maxRoomDevices))
 		return
 	}
 	var target *Pending
@@ -1088,12 +1197,17 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		frames, next := s.readInbox(room.ID, me, since)
 		if len(frames) > 0 || time.Now().After(deadline) {
 			room.mu.Lock()
+			// 多设备：任一对端在线即算在线，peerSeenSec 取最近活跃的那台
 			peerOnline, peerSeen := false, -1
 			for _, d := range room.Devices {
 				if d.Approved && d.ID != me {
 					sec := int(time.Since(d.LastSeen).Seconds())
-					peerSeen = sec
-					peerOnline = sec < 20
+					if peerSeen < 0 || sec < peerSeen {
+						peerSeen = sec
+					}
+					if sec < 20 {
+						peerOnline = true
+					}
 				}
 			}
 			revoked := true

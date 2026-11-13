@@ -116,6 +116,12 @@ namespace ClipHelper
         public bool SyncServerOwner;                 // 本机是这间配对房间的发起方（负责看"待确认"）
         public long SyncServerSeq;                   // 已确认收到的最大序号（长轮询游标）
 
+        // ---- 自动更新（P0：检查、确认、下载校验；不自动替换 exe）
+        public string UpdateSource = "";             // 更新清单地址，空则用 UpdateService.DefaultSource
+        public string SkippedVersion = "";           // 用户选择「跳过此版本」的版本号
+        public bool UpdateCheckEnabled = true;       // 是否自动检查
+        public DateTime LastUpdateCheckUtc;          // 最近一次检查时间（UTC）
+
         [XmlIgnore]
         public string SettingsPathOverride;   // 仅测试工具使用：把设置写到别处，避免影响真实安装
 
@@ -167,6 +173,8 @@ namespace ClipHelper
             if (s.SyncServerToken == null) s.SyncServerToken = "";
             if (s.SyncServerCode == null) s.SyncServerCode = "";
             if (s.SyncServerPeerId == null) s.SyncServerPeerId = "";
+            if (s.UpdateSource == null) s.UpdateSource = "";
+            if (s.SkippedVersion == null) s.SkippedVersion = "";
             return s;
         }
 

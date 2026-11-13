@@ -27,6 +27,7 @@ namespace ClipHelper
 
         public event Action OpenRequested;
         public event Action SettingsRequested;
+        public event Action UpdateRequested;
         public event Action ClearRequested;
         public event Action PauseRequested;
         public event Action ExitRequested;
@@ -107,6 +108,10 @@ namespace ClipHelper
             settings.ShortcutKeyDisplayString = "";
             settings.Click += delegate { if (SettingsRequested != null) SettingsRequested(); };
             _menu.Items.Add(settings);
+
+            WinForms.ToolStripMenuItem checkUpdate = NewItem("检查更新", skin, false);
+            checkUpdate.Click += delegate { if (UpdateRequested != null) UpdateRequested(); };
+            _menu.Items.Add(checkUpdate);
 
             _clear = NewItem("清空历史", skin, false);
             _clear.Click += delegate { if (ClearRequested != null) ClearRequested(); };

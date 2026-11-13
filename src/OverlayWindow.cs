@@ -428,6 +428,7 @@ namespace ClipHelper
 
             card.Child = root;
             Content = card;
+            Ui.EnableDrag(this, card, 56, _searchBox);
 
             PreviewKeyDown += WindowKeyDown;
         }

@@ -5,6 +5,7 @@ using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
@@ -104,6 +105,30 @@ namespace ClipHelper
             get
             {
                 if (!ServerCodeActive) return 0;
+                double s = (_cfg.SyncServerCodeExpireUtc - DateTime.UtcNow).TotalSeconds;
+                if (s < 0) s = 0;
+                return (int)Math.Ceiling(s);
+            }
+        }
+
+        /// <summary>已配对后邀请第 3 / 4 台用的邀请码。与首次配对码共用存储，但不要求「还没有对端」。</summary>
+        public bool InviteCodeActive
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(_cfg.SyncServerRoomId)) return false;
+                if (string.IsNullOrEmpty(_cfg.SyncServerCode)) return false;
+                return DateTime.UtcNow < _cfg.SyncServerCodeExpireUtc;
+            }
+        }
+
+        public string InviteCode { get { return InviteCodeActive ? _cfg.SyncServerCode : ""; } }
+
+        public int InviteCodeSecondsLeft
+        {
+            get
+            {
+                if (!InviteCodeActive) return 0;
                 double s = (_cfg.SyncServerCodeExpireUtc - DateTime.UtcNow).TotalSeconds;
                 if (s < 0) s = 0;
                 return (int)Math.Ceiling(s);
@@ -232,6 +257,35 @@ namespace ClipHelper
             return CreateServerRoom();
         }
 
+        /// <summary>
+        /// 已配对之后：给现有房间再要一个 6 位邀请码，用来加第 3 / 4 台。
+        /// 不重建房间、不换 master；配对码在服务端 approve 后作废，所以每加一台都要重新取一次。
+        /// </summary>
+        public string InviteServerDevice()
+        {
+            if (!ServerConfigured) return "请先填写服务器地址与端口。";
+            if (string.IsNullOrEmpty(_cfg.SyncServerRoomId) || string.IsNullOrEmpty(_cfg.SyncServerToken))
+                return "这台电脑还没有加入房间，请先完成一次配对。";
+
+            StringBuilder sb = new StringBuilder();
+            sb.Append("{\"roomId\":\"").Append(Json.Escape(_cfg.SyncServerRoomId)).Append("\"");
+            sb.Append(",\"deviceId\":\"").Append(Json.Escape(DeviceId)).Append("\"");
+            sb.Append(",\"token\":\"").Append(Json.Escape(_cfg.SyncServerToken)).Append("\"}");
+            SrvCall r = Call("POST", "/v1/room/invite", sb.ToString(), 12000);
+            string err = ErrorText(r);
+            if (err != null) return err;
+
+            Dictionary<string, object> o = Json.ParseObject(r.Body);
+            string code = Json.GetString(o, "code");
+            if (code.Length != 6) return "服务器返回的数据不完整，请稍后重试。";
+            _cfg.SyncServerCode = code;
+            _cfg.SyncServerCodeExpireUtc = DateTime.UtcNow.AddSeconds(Json.GetLong(o, "expireSec", 300));
+            _cfg.Save();
+            _serverReachable = true;
+            RaiseChanged();
+            return null;
+        }
+
         /// <summary>放弃这台电脑上的配对等待（不影响已经配好的设备）。</summary>
         public void CancelServerPairing()
         {
@@ -263,7 +317,7 @@ namespace ClipHelper
             {
                 Dictionary<string, object> eo = Json.ParseObject(r.Body);
                 string c = Json.GetString(eo, "code");
-                if (c == "room_full") return "对方设备已达上限（最多 2 台），需要先在对方电脑上移除一台。";
+                if (c == "room_full") return "对方设备已达上限（最多 4 台），需要先在对方电脑上移除一台。";
                 if (c == "device_conflict") return "这台电脑已经在那台服务器的配对里了。要重新配对，请先在另一端移除它。";
                 return "服务器拒绝了这次配对。";
             }
@@ -411,8 +465,21 @@ namespace ClipHelper
                 return;
             }
 
-            // 允许之后：生成共享密钥，用配对码派生的密钥加密，投递给对方
-            byte[] master = RandomBytes(32);
+            // 允许之后：复用房间已有的 master，用当前邀请码派生的临时密钥加密，投递给对方。
+            // 每加一台都新建 master 的话，先加入的设备仍用旧密钥，之后所有内容都会解不开。
+            byte[] master = null;
+            SyncPeer existing = Peer;
+            if (existing != null && !string.IsNullOrEmpty(existing.Key))
+            {
+                try
+                {
+                    master = ProtectedData.Unprotect(Convert.FromBase64String(existing.Key),
+                        null, DataProtectionScope.CurrentUser);
+                }
+                catch { master = null; }
+            }
+            bool hadMaster = (master != null && master.Length == 32);
+            if (!hadMaster) master = RandomBytes(32);
             Cipher byCode = new Cipher(DeriveFromCode(_cfg.SyncServerCode));
             Msg ok = new Msg("pairapprove");
             ok.AddRaw("id", DeviceId);
@@ -425,6 +492,17 @@ namespace ClipHelper
             if (perr != null)
             {
                 SetError("已允许加入，但密钥没能送到对方：" + perr);
+                RaiseChanged();
+                return;
+            }
+            if (hadMaster)
+            {
+                // 房间已有设备：密钥与 peer 都没变，不重建。
+                // SavePeer 会把 LastSyncUtc 归零，导致整份历史重推给所有设备并来回回推。
+                _cfg.SyncServerCode = "";
+                _cfg.SyncServerCodeExpireUtc = DateTime.MinValue;
+                _cfg.Save();
+                _lastError = null;
                 RaiseChanged();
                 return;
             }
@@ -482,10 +560,12 @@ namespace ClipHelper
                     if (now < _relayNextTryUtc) { Thread.Sleep(300); continue; }
                     if (_serverDevicesUtc == DateTime.MinValue || (now - _serverDevicesUtc).TotalSeconds > 6)
                         RefreshServerDevices(false);
+                    // 已配对之后也要继续看有没有新设备申请加入（邀请第 3 / 4 台）。
+                    // PollPairingServer 自带 2 秒节流，且只由建房间的那台执行。
+                    PollPairingServer();
                     SyncPeer peer = Peer;
                     if (peer == null)
                     {
-                        PollPairingServer();
                         Thread.Sleep(900);
                         continue;
                     }
@@ -515,7 +595,8 @@ namespace ClipHelper
         /// <summary>还没配对时：轮询服务器，看有没有新设备用配对码申请加入。</summary>
         void PollPairingServer()
         {
-            if (!_cfg.SyncServerOwner) return;
+            // 建房间的那台始终审批；其他已配对设备只要自己发出了邀请码，也能审批这次加入
+            if (!_cfg.SyncServerOwner && !InviteCodeActive) return;
             if (string.IsNullOrEmpty(_cfg.SyncServerRoomId) || string.IsNullOrEmpty(_cfg.SyncServerToken)) return;
             if (DateTime.UtcNow < _nextPairPollUtc) return;
             _nextPairPollUtc = DateTime.UtcNow.AddSeconds(2);

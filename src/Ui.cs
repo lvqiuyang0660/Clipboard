@@ -261,6 +261,7 @@ namespace ClipHelper
             t.Foreground = fg;
             t.TextWrapping = TextWrapping.NoWrap;
             t.FontFamily = Theme.Font;
+            t.VerticalAlignment = VerticalAlignment.Center;
             return t;
         }
 
@@ -433,6 +434,27 @@ namespace ClipHelper
                 chrome.UseAeroCaptionButtons = false;
                 System.Windows.Shell.WindowChrome.SetWindowChrome(w, chrome);
             }
+        }
+
+        /// <summary>无边框窗口：按住顶部空白区域即可拖动；按钮、输入框等交互控件不触发。</summary>
+        public static void EnableDrag(Window w, FrameworkElement area, double topHeight, params FrameworkElement[] exclude)
+        {
+            area.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (e.ButtonState != MouseButtonState.Pressed) return;
+                if (e.GetPosition(w).Y > topHeight) return;
+                DependencyObject cur = e.OriginalSource as DependencyObject;
+                while (cur != null && cur != area)
+                {
+                    if (cur is TextBox || cur is ClickBox || cur is ButtonBase || cur is ScrollBar) return;
+                    for (int i = 0; i < exclude.Length; i++)
+                    {
+                        if (cur == exclude[i]) return;
+                    }
+                    cur = VisualTreeHelper.GetParent(cur);
+                }
+                try { w.DragMove(); } catch { }
+            };
         }
 
         public static bool Confirm(Window owner, string title, string message, string okText, string cancelText)
